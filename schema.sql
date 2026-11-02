@@ -1,5 +1,5 @@
 CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     character_id TEXT NOT NULL,
     character_version TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed')),
@@ -9,7 +9,7 @@ CREATE TABLE sessions (
 );
 
 CREATE TABLE events (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
     seq INTEGER NOT NULL,
     type TEXT NOT NULL,
@@ -21,7 +21,7 @@ CREATE TABLE events (
 
 CREATE INDEX idx_events_turn_id ON events (turn_id);
 
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
+CREATE TABLE alembic_version (
+    version_num VARCHAR(32) NOT NULL,
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
 );

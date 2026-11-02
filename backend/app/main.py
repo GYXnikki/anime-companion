@@ -18,15 +18,6 @@ from app.transport.http.health import router as health_router
 from app.transport.http.sessions import router as sessions_router
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    try:
-        check_migrations(settings.database_path)
-    except MigrationError as exc:
-        raise RuntimeError(f"数据库未就绪：{exc}") from exc
-    yield
-
-
 def create_app(*, llm: LlmPort | None = None) -> FastAPI:
     """Build the app.
 
@@ -34,6 +25,18 @@ def create_app(*, llm: LlmPort | None = None) -> FastAPI:
     wiring uses the MockLlm adapter until a real provider is chosen.
     """
     store = SqliteEventStore(settings.database_path)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        try:
+            check_migrations(settings.database_path)
+        except MigrationError as exc:
+            raise RuntimeError(f"数据库未就绪：{exc}") from exc
+        try:
+            yield
+        finally:
+            await store.dispose()
+
     chat_service = ChatService(
         store=store,
         llm=llm or MockLlm(),

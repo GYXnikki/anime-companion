@@ -483,7 +483,7 @@ interface MemoryStore {
 ```
 
 - 业务只依赖接口，不直接写 SQL
-- 用迁移工具（Drizzle / Kysely / Alembic），schema 进版本控制
+- 用迁移工具（Alembic），schema 进版本控制
 - 类型可移植：ID 用 `TEXT` 存 ULID，时间统一 UTC ISO8601，JSON 先当 `TEXT` 存，到 PG 再换 `JSONB`
 - 别用 SQLite 独有能力（比如 `rowid` 假设）
 
@@ -1052,7 +1052,8 @@ class TurnRuntime {
 | 2026-10-30 | 数据库 | SQLite（P0–P3） | 单用户零运维，后续可迁移 PostgreSQL |
 | 2026-11-02 | 事件归属 | `events` 增加 `turn_id`，其余字段延后 | 见 ADR-0001 |
 | 2026-11-02 | 事件写入 | 批量 append 单事务，`seq` 在 `BEGIN IMMEDIATE` 内分配 | 危机路径必须原子 |
-| 2026-11-02 | 存储访问 | SQLite + aiosqlite + 手写 SQL；迁移用同步 sqlite3 | 事件读写异步，CLI 迁移简单 |
+| 2026-11-02 | 存储访问 | SQLite + SQLAlchemy 2.0 async（aiosqlite）+ Alembic | 见 ADR-0002；domain 不依赖 ORM |
+| 2026-11-02 | 事务边界 | 写事务统一 `BEGIN IMMEDIATE`，seq 分配不交给 ORM | SQLite 并发正确性 |
 | 2026-11-02 | P0 LLM | 只接 MockLlm，真实供应商未定 | 先验证链路，失败不伪造 |
 | 2026-11-02 | 上下文 | 最近 20 轮 = 20 组 user + reply；失败轮保留 user | 可预测、可测 |
 

@@ -11,13 +11,11 @@ from app.config import settings
 from app.domain.ports import LlmPort
 from app.main import create_app
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
-
 
 @pytest.fixture
 def app_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     db_path = tmp_path / "anime_companion.db"
-    apply_migrations(db_path, MIGRATIONS_DIR)
+    apply_migrations(db_path)
     monkeypatch.setattr(settings, "database_path", str(db_path))
 
     def factory(llm: LlmPort | None = None) -> FastAPI:

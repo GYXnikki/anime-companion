@@ -7,8 +7,6 @@ from app.adapters.storage.migrations import apply_migrations
 from app.config import settings
 from app.main import create_app
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
-
 
 async def test_startup_fails_when_database_is_not_migrated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -25,7 +23,7 @@ async def test_startup_succeeds_when_database_is_migrated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = tmp_path / "anime_companion.db"
-    apply_migrations(db_path, MIGRATIONS_DIR)
+    apply_migrations(db_path)
     monkeypatch.setattr(settings, "database_path", str(db_path))
     app = create_app()
 

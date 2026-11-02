@@ -1,8 +1,10 @@
 import json
 import sqlite3
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.adapters.storage import sqlite_event_store as store_module
 from app.adapters.storage.migrations import apply_migrations
@@ -16,10 +18,12 @@ NOW = "2026-11-02T00:00:00.000Z"
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> SqliteEventStore:
+async def store(tmp_path: Path) -> AsyncIterator[SqliteEventStore]:
     db_path = tmp_path / "anime_companion.db"
-    apply_migrations(db_path, MIGRATIONS_DIR)
-    return SqliteEventStore(db_path)
+    apply_migrations(db_path)
+    event_store = SqliteEventStore(db_path)
+    yield event_store
+    await event_store.dispose()
 
 
 def make_session() -> Session:
@@ -90,14 +94,14 @@ async def test_batch_append_rolls_back_on_partial_failure(
     session = await create_session(store)
     monkeypatch.setattr(store_module, "new_ulid", lambda: "01DUPLICATED0000000000000")
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(IntegrityError):
         await store.append(
             session.id,
             [user_text("一", turn_id=new_ulid()), user_text("二", turn_id=new_ulid())],
         )
 
     assert [event.type for event in await store.list_events(session.id)] == ["session.started"]
-    with sqlite3.connect(store._path) as conn:
+    with sqlite3.connect(store.database_path) as conn:
         row = conn.execute(
             "SELECT last_seq FROM sessions WHERE id = ?", (session.id,)
         ).fetchone()
@@ -129,7 +133,7 @@ async def test_payload_is_stored_as_readable_json(store: SqliteEventStore) -> No
 
     events = await store.append(session.id, [user_text("今天有点累", turn_id=new_ulid())])
 
-    with sqlite3.connect(store._path) as conn:
+    with sqlite3.connect(store.database_path) as conn:
         raw = conn.execute(
             "SELECT payload_json FROM events WHERE id = ?", (events[0].id,)
         ).fetchone()

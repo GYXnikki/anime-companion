@@ -70,7 +70,7 @@
 | 流式传输 | SSE | 文字场景最简单，自动重连 |
 | 事件存储 | 只存语义事件，不存 token 级 delta | 避免写放大 |
 | 安全 | 关键词规则先于 LLM；命中后不调用 LLM | 固定、可审计、不靠模型自由发挥 |
-| 存储 | SQLite + aiosqlite + 手写 SQL | 单用户、零运维、可迁移 |
+| 存储 | SQLite + SQLAlchemy 2.0 async + Alembic | 单用户、零运维、可迁移；domain 不依赖 ORM |
 | 会话并发 | 每个 session 一把 asyncio 锁 | P0 单进程，避免同会话并发写 |
 | 错误 | SSE `error` 事件 + `assistant.failed` 事件 | 失败不伪造回复 |
 
@@ -354,9 +354,9 @@ schema_migrations(
 
 ### 9.4 迁移执行
 
-- 手动执行：`cd backend && uv run python -m app.cli migrate`；`status` 查看已应用/待应用版本
+- 手动执行：`cd backend && uv run python -m app.cli migrate`；`status` 查看当前/最新版本
 - 应用启动只检查，不自动迁移；存在待应用 migration 时启动失败并提示上述命令
-- migration 文件按 `0001_*.sql` 连续编号；版本断档、已应用版本缺文件时 CLI 和启动均报错
+- migration 由 Alembic 管理（`backend/alembic/versions/`）；数据库版本找不到对应文件、或存在多个 head 时 CLI 和启动均报错
 
 ---
 
@@ -485,6 +485,8 @@ uv run mypy app
 | 会话锁 | `app/application/locks.py` |
 | ChatService / SSE 事件流 | `app/application/chat.py` |
 | SQLite 事件存储 | `app/adapters/storage/sqlite_event_store.py` |
+| 数据库连接与事务 | `app/adapters/storage/database.py`（`BEGIN IMMEDIATE`） |
+| 迁移 | `backend/alembic/versions/0001_init.py` |
 | MockLlm | `app/adapters/llm/mock.py` |
 | HTTP 接口 | `app/transport/http/{sessions,chat}.py` |
 
@@ -492,9 +494,9 @@ uv run mypy app
 
 ```text
 cd backend
-uv run pytest        → 40 passed
+uv run pytest        → 39 passed
 uv run ruff check .  → All checks passed
-uv run mypy app      → Success: no issues found in 30 source files
+uv run mypy app      → Success: no issues found in 32 source files
 ```
 
 决策记录见 `docs/adr/0001-event-log-p0.md`。

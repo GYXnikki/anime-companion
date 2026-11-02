@@ -1,11 +1,13 @@
 import json
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
-import aiosqlite
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters.storage.database import create_database_engine, create_session_factory
+from app.adapters.storage.tables import EventRow, SessionRow
 from app.domain.errors import SessionNotFound
 from app.domain.events import (
     ACTOR_BY_TYPE,
@@ -21,114 +23,73 @@ from app.shared.time import utc_now_iso
 
 
 class SqliteEventStore:
-    """Event log backed by SQLite.
+    """Event log backed by SQLite through SQLAlchemy.
 
-    Sequence numbers are assigned inside a `BEGIN IMMEDIATE` transaction, so a
-    batch either lands completely or not at all.
+    Every write runs inside a transaction that begins with `BEGIN IMMEDIATE`
+    (see `create_database_engine`), so a batch either lands completely or not
+    at all and `seq` can never be handed out twice.
     """
 
     def __init__(self, database_path: str | Path) -> None:
-        self._path = Path(database_path)
+        self.database_path = Path(database_path)
+        self._engine = create_database_engine(self.database_path)
+        self._session_factory: async_sessionmaker[AsyncSession] = create_session_factory(
+            self._engine
+        )
 
-    @asynccontextmanager
-    async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
-        conn = await aiosqlite.connect(self._path, isolation_level=None)
-        try:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA foreign_keys = ON")
-            await conn.execute("PRAGMA busy_timeout = 5000")
-            yield conn
-        finally:
-            await conn.close()
+    async def dispose(self) -> None:
+        await self._engine.dispose()
 
     async def create_session(self, session: Session, started: EventDraft) -> Event:
-        async with self._connect() as conn:
-            try:
-                await conn.execute("BEGIN IMMEDIATE")
-                await conn.execute(
-                    """
-                    INSERT INTO sessions (
-                        id, character_id, character_version, status,
-                        last_seq, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 0, ?, ?)
-                    """,
-                    (
-                        session.id,
-                        session.character_id,
-                        session.character_version,
-                        session.status,
-                        session.created_at,
-                        session.updated_at,
-                    ),
+        async with self._session_factory() as db, db.begin():
+            db.add(
+                SessionRow(
+                    id=session.id,
+                    character_id=session.character_id,
+                    character_version=session.character_version,
+                    status=session.status,
+                    last_seq=0,
+                    created_at=session.created_at,
+                    updated_at=session.updated_at,
                 )
-                events = await self._append_in_connection(conn, session.id, [started])
-                await conn.commit()
-            except BaseException:
-                await conn.rollback()
-                raise
+            )
+            await db.flush()
+            events = await self._append(db, session.id, [started])
         return events[0]
 
     async def get_session(self, session_id: str) -> Session | None:
-        async with self._connect() as conn:
-            cursor = await conn.execute(
-                """
-                SELECT id, character_id, character_version, status, created_at, updated_at
-                FROM sessions WHERE id = ?
-                """,
-                (session_id,),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        return Session(
-            id=cast(str, row["id"]),
-            character_id=cast(str, row["character_id"]),
-            character_version=cast(str, row["character_version"]),
-            status=cast(SessionStatus, row["status"]),
-            created_at=cast(str, row["created_at"]),
-            updated_at=cast(str, row["updated_at"]),
-        )
+        async with self._session_factory() as db:
+            row = await db.get(SessionRow, session_id)
+            return None if row is None else _to_session(row)
 
     async def append(self, session_id: str, drafts: Sequence[EventDraft]) -> list[Event]:
         if not drafts:
             return []
-        async with self._connect() as conn:
-            try:
-                await conn.execute("BEGIN IMMEDIATE")
-                events = await self._append_in_connection(conn, session_id, drafts)
-                await conn.commit()
-            except BaseException:
-                await conn.rollback()
-                raise
+        async with self._session_factory() as db, db.begin():
+            events = await self._append(db, session_id, drafts)
         return events
 
     async def list_events(self, session_id: str) -> list[Event]:
-        async with self._connect() as conn:
-            cursor = await conn.execute(
-                """
-                SELECT id, session_id, seq, type, turn_id, payload_json, created_at
-                FROM events WHERE session_id = ? ORDER BY seq ASC
-                """,
-                (session_id,),
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(EventRow)
+                .where(EventRow.session_id == session_id)
+                .order_by(EventRow.seq.asc())
             )
-            rows = await cursor.fetchall()
-        return [_row_to_event(row) for row in rows]
+            rows = result.scalars().all()
+            return [_to_event(row) for row in rows]
 
-    async def _append_in_connection(
+    async def _append(
         self,
-        conn: aiosqlite.Connection,
+        db: AsyncSession,
         session_id: str,
         drafts: Sequence[EventDraft],
     ) -> list[Event]:
-        cursor = await conn.execute(
-            "SELECT last_seq FROM sessions WHERE id = ?",
-            (session_id,),
-        )
-        row = await cursor.fetchone()
+        row = await db.get(SessionRow, session_id)
         if row is None:
             raise SessionNotFound(session_id)
 
-        seq = int(row["last_seq"])
+        seq = row.last_seq
         created_at = utc_now_iso()
         events: list[Event] = []
         for draft in drafts:
@@ -143,43 +104,48 @@ class SqliteEventStore:
                 payload=draft.payload,
                 created_at=created_at,
             )
-            await conn.execute(
-                """
-                INSERT INTO events (id, session_id, seq, type, turn_id, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.id,
-                    session_id,
-                    seq,
-                    event.type,
-                    event.turn_id,
-                    json.dumps(event.payload, ensure_ascii=False),
-                    created_at,
-                ),
+            db.add(
+                EventRow(
+                    id=event.id,
+                    session_id=session_id,
+                    seq=seq,
+                    type=event.type,
+                    turn_id=event.turn_id,
+                    payload_json=json.dumps(event.payload, ensure_ascii=False),
+                    created_at=created_at,
+                )
             )
             events.append(event)
 
-        await conn.execute(
-            "UPDATE sessions SET last_seq = ?, updated_at = ? WHERE id = ?",
-            (seq, created_at, session_id),
-        )
+        row.last_seq = seq
+        row.updated_at = created_at
         return events
 
 
-def _row_to_event(row: aiosqlite.Row) -> Event:
-    event_type = cast(EventType, row["type"])
+def _to_session(row: SessionRow) -> Session:
+    return Session(
+        id=row.id,
+        character_id=row.character_id,
+        character_version=row.character_version,
+        status=cast(SessionStatus, row.status),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_event(row: EventRow) -> Event:
+    event_type = cast(EventType, row.type)
     payload_model = PAYLOAD_MODELS.get(event_type)
     if payload_model is None:
         raise ValueError(f"unknown event type in database: {event_type}")
-    payload = payload_model.model_validate(json.loads(cast(str, row["payload_json"]))).model_dump()
+    payload = payload_model.model_validate(json.loads(row.payload_json)).model_dump()
     return Event(
-        id=cast(str, row["id"]),
-        session_id=cast(str, row["session_id"]),
-        seq=int(row["seq"]),
+        id=row.id,
+        session_id=row.session_id,
+        seq=row.seq,
         type=event_type,
-        turn_id=cast(str | None, row["turn_id"]),
+        turn_id=row.turn_id,
         actor=ACTOR_BY_TYPE[event_type],
         payload=payload,
-        created_at=cast(str, row["created_at"]),
+        created_at=row.created_at,
     )
