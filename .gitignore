@@ -1,0 +1,30 @@
+.DS_Store
+.idea/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env
+.env
+.env.local
+
+# Data
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+node_modules/
+dist/
+
+# Local agent tooling
+.opencode/
+
+# Private notes
+docs/private/
